@@ -1,5 +1,12 @@
-from gym.envs.registration import register
-import gym
+import sys
+sys.path.append("../")
+
+import gymnasium as gym
+from gymnasium.envs.registration import register
+from .create_maze_env import create_maze_env, register_maze_envs, register_fetch_envs
+from .ant import AntEnv
+from .point import PointEnv
+from .maze_env import MazeEnv
 
 robots = ["Point", "Ant"]
 task_types = [
@@ -15,6 +22,7 @@ task_types = [
     "MazeP",
 ]
 all_name = [x + y for x in robots for y in task_types]
+
 for name_t in all_name:
     for Test in ["", "Test"]:
         maze_args = [[-4, -4], [20, 20]]
@@ -58,7 +66,8 @@ for name_t in all_name:
                 random_start = False
                 max_timestep = 1000
 
-        register(
+        # Using gymnasium.register instead of register
+        gym.register(
             id=name_t + Test + "-v0",
             entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
             kwargs={
@@ -72,7 +81,7 @@ for name_t in all_name:
         )
 
         # v1 is the one we use in the main paper
-        register(
+        gym.register(
             id=name_t + Test + "-v1",
             entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
             kwargs={
@@ -85,7 +94,7 @@ for name_t in all_name:
             max_episode_steps=max_timestep,
         )
 
-        register(
+        gym.register(
             id=name_t + Test + "-v2",
             entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
             kwargs={
@@ -98,14 +107,14 @@ for name_t in all_name:
             max_episode_steps=max_timestep,
         )
 
-register(
+gym.register(
     id="Reacher3D-v0",
     entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
     kwargs={"env_name": "Reacher3D-v0"},
     max_episode_steps=100,
 )
 
-register(
+gym.register(
     id="Pusher-v0",
     entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
     kwargs={"env_name": "Pusher-v0"},

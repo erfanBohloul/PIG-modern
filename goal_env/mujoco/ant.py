@@ -17,8 +17,8 @@
 
 import math
 import numpy as np
-from gym import utils
-from gym.envs.mujoco import mujoco_env
+from gymnasium import utils, spaces
+from gymnasium.envs.mujoco import MujocoEnv
 
 
 def q_inv(a):
@@ -33,7 +33,9 @@ def q_mult(a, b):  # multiply two quaternion
     return [w, i, j, k]
 
 
-class AntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
+class AntEnv(MujocoEnv, utils.EzPickle):
+    """Modernized Ant Environment for MuJoCo"""
+    
     FILE = "ant.xml"
     ORI_IND = 3
 
@@ -43,44 +45,81 @@ class AntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         expose_all_qpos=True,
         expose_body_coms=None,
         expose_body_comvels=None,
+        render_mode=None,
+        **kwargs
     ):
         self._expose_all_qpos = expose_all_qpos
-        self._expose_body_coms = expose_body_coms
-        self._expose_body_comvels = expose_body_comvels
+        self._expose_body_coms = expose_body_coms if expose_body_coms is not None else []
+        self._expose_body_comvels = expose_body_comvels if expose_body_comvels is not None else []
         self._body_com_indices = {}
         self._body_comvel_indices = {}
 
-        mujoco_env.MujocoEnv.__init__(self, file_path, 5)
+        # Determine observation space
+        if self._expose_all_qpos:
+            obs_dim = 15 + 14  # qpos[:15] + qvel[:14]
+        else:
+            obs_dim = 13 + 14  # qpos[2:15] + qvel[:14]
+        
+        # Add body coms
+        obs_dim += len(self._expose_body_coms) * 3  # Each com is 3D
+        obs_dim += len(self._expose_body_comvels) * 3  # Each comvel is 3D
+        
+        # Create observation space
+        observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+        )
+
+        # Modern MujocoEnv initialization with observation_space
+        if file_path is not None:
+            MujocoEnv.__init__(
+                self, 
+                file_path, 
+                5, 
+                observation_space=observation_space,
+                render_mode=render_mode,
+                **kwargs
+            )
+        else:
+            # Use default model path if no file_path provided
+            MujocoEnv.__init__(
+                self, 
+                self.FILE, 
+                5, 
+                observation_space=observation_space,
+                render_mode=render_mode,
+                **kwargs
+            )
         utils.EzPickle.__init__(self)
 
     @property
     def physics(self):
         return self.model
 
-    def _step(self, a):
-        return self.step(a)
-
-    def step(self, a):
+    def step(self, action):
+        """Modern Gymnasium step method"""
         xposbefore = self.get_body_com("torso")[0]
-        self.do_simulation(a, self.frame_skip)
+        self.do_simulation(action, self.frame_skip)
         xposafter = self.get_body_com("torso")[0]
+        
         forward_reward = (xposafter - xposbefore) / self.dt
-        ctrl_cost = 0.5 * np.square(a).sum()
+        ctrl_cost = 0.5 * np.square(action).sum()
         survive_reward = 1.0
         reward = forward_reward - ctrl_cost + survive_reward
-        state = self.state_vector()
-        done = False
-        ob = self._get_obs()
-        return (
-            ob,
-            reward,
-            done,
-            dict(
-                reward_forward=forward_reward,
-                reward_ctrl=-ctrl_cost,
-                reward_survive=survive_reward,
-            ),
-        )
+        
+        # Check if terminated (ant fell over)
+        z_pos = self.data.qpos[2]
+        terminated = bool(z_pos < 0.2)
+        truncated = False
+        
+        ob = self._get_obs().astype(np.float32)
+        info = {
+            "reward_forward": float(forward_reward),
+            "reward_ctrl": float(-ctrl_cost),
+            "reward_survive": float(survive_reward),
+        }
+        
+        # Modern Gymnasium: (obs, reward, terminated, truncated, info)
+        return ob, float(reward), terminated, truncated, info
 
     def _get_obs(self):
         # No cfrc observation
@@ -114,13 +153,15 @@ class AntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
                     indices = range(len(obs), len(obs) + len(comvel))
                     self._body_comvel_indices[name] = indices
                 obs = np.concatenate([obs, comvel])
-        return obs
+        
+        return obs.astype(np.float32)
 
     def reset_model(self):
+        """Reset the model to initial state"""
         qpos = self.init_qpos + self.np_random.uniform(
             size=self.model.nq, low=-0.1, high=0.1
         )
-        qvel = self.init_qvel + self.np_random.randn(self.model.nv) * 0.1
+        qvel = self.init_qvel + self.np_random.standard_normal(self.model.nv) * 0.1
 
         # Set everything other than ant to original position and 0 velocity.
         qpos[15:] = self.init_qpos[15:]
@@ -128,8 +169,30 @@ class AntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
         self.set_state(qpos, qvel)
         return self._get_obs()
 
+    def reset(self, seed=None, options=None):
+        """Modern Gymnasium reset method"""
+        # Handle seeding
+        if seed is not None:
+            self.np_random, _ = utils.seeding.np_random(seed)
+        
+        # Call parent reset
+        obs = self.reset_model()
+        
+        # Modern Gymnasium returns (obs, info)
+        return obs.astype(np.float32), {}
+
     def viewer_setup(self):
-        self.viewer.cam.distance = self.model.stat.extent
+        """Setup the viewer camera"""
+        if self.viewer is not None:
+            self.viewer.cam.distance = self.model.stat.extent
+
+    def render(self):
+        """Modern Gymnasium render method"""
+        if self.render_mode == "human":
+            return super().render()
+        elif self.render_mode == "rgb_array":
+            return super().render()
+        return None
 
     def get_ori(self):
         ori = [0, 1, 0, 0]
@@ -150,3 +213,10 @@ class AntEnv(mujoco_env.MujocoEnv, utils.EzPickle):
 
     def get_xy(self):
         return self.data.qpos[:2]
+    
+    def close(self):
+        """Close the environment"""
+        if hasattr(self, 'viewer') and self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
+        super().close()

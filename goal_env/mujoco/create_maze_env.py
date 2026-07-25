@@ -1,31 +1,49 @@
 from .ant_maze_env import AntMazeEnv
 from .point_maze_env import PointMazeEnv
 from collections import OrderedDict
-import gym
+import gymnasium as gym
 import numpy as np
 import copy
-from gym import Wrapper
-from gym.envs.registration import EnvSpec
+from gymnasium import Wrapper
+from gymnasium.envs.registration import EnvSpec
 
 
 class GoalWrapper(Wrapper):
+    """Modernized Goal Wrapper for MuJoCo Maze Environments"""
+    
     def __init__(
-        self, env, maze_size_scaling, random_start, low, high, maze_low, maze_high
+        self, 
+        env, 
+        maze_size_scaling, 
+        random_start, 
+        low, 
+        high, 
+        maze_low, 
+        maze_high,
+        render_mode=None,
     ):
         super(GoalWrapper, self).__init__(env)
+        
+        # Store render mode
+        self._render_mode = render_mode
+        
+        # Get observation space
         ob_space = env.observation_space
         self.maze_size_scaling = maze_size_scaling
-        low = np.array(low, dtype=ob_space.dtype)
-        high = np.array(high, dtype=ob_space.dtype)
-        maze_low = np.array(maze_low, dtype=ob_space.dtype)
-        maze_high = np.array(maze_high, dtype=ob_space.dtype)
-        self.maze_size_scaling = maze_size_scaling
-        self.goal_space = gym.spaces.Box(low=low, high=high)
-        self.maze_space = gym.spaces.Box(low=maze_low, high=maze_high)
+        
+        # Convert to numpy arrays with proper dtype
+        low = np.array(low, dtype=np.float32)
+        high = np.array(high, dtype=np.float32)
+        maze_low = np.array(maze_low, dtype=np.float32)
+        maze_high = np.array(maze_high, dtype=np.float32)
+        
+        self.goal_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+        self.maze_space = gym.spaces.Box(low=maze_low, high=maze_high, dtype=np.float32)
 
         self.goal_dim = low.size
         self.distance_threshold = 5 * maze_size_scaling / 8.0
 
+        # Modern Gymnasium uses spaces.Dict
         self.observation_space = gym.spaces.Dict(
             OrderedDict(
                 {
@@ -39,24 +57,47 @@ class GoalWrapper(Wrapper):
         self.random_start = random_start
 
     def step(self, action):
-        observation, reward, done, info = self.env.step(action)
+        """Modern Gymnasium step method"""
+        # Step the environment - returns 5 values in modern Gymnasium
+        observation, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Get achieved goal from observation
+        achieved_goal = observation[..., :self.goal_dim].astype(np.float32)
+        
+        # Create observation dict
         out = {
-            "observation": observation,
-            "desired_goal": self.goal,
-            "achieved_goal": observation[..., : self.goal_dim],
+            "observation": observation.astype(np.float32),
+            "desired_goal": self.goal.astype(np.float32) if self.goal is not None else None,
+            "achieved_goal": achieved_goal,
         }
-        reward = -np.linalg.norm(observation[..., : self.goal_dim] - self.goal, axis=-1)
+        
+        # Calculate reward
+        reward = self.compute_rew(achieved_goal, self.goal, info)
         info["is_success"] = reward > -self.distance_threshold
-        reward = self.compute_rew(observation[..., : self.goal_dim], self.goal, "...")
-        return out, reward, done, info
+        
+        # Convert reward to Python float
+        reward = float(reward)
+        
+        # Modern Gymnasium: (obs, reward, terminated, truncated, info)
+        return out, reward, terminated, truncated, info
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        """Modern Gymnasium reset method"""
+        # Handle seeding
+        if seed is not None:
+            np.random.seed(seed)
+            if hasattr(self.env, 'reset'):
+                self.env.reset(seed=seed)
+        
+        # Reset the environment
         observation = self.env.reset()
+        
+        # Sample a goal
         self.goal = self.goal_space.sample()
         while self.env._is_in_collision(self.goal):
             self.goal = self.goal_space.sample()
-
-        # random start a position without collision
+        
+        # Random start position without collision
         if self.random_start:
             xy = self.maze_space.sample()
             while self.env._is_in_collision(xy):
@@ -64,11 +105,19 @@ class GoalWrapper(Wrapper):
             self.env.wrapped_env.set_xy(xy)
             observation = self.env._get_obs()
 
-        out = {"observation": observation, "desired_goal": self.goal}
-        out["achieved_goal"] = observation[..., : self.goal_dim]
-        return out
+        # Create observation dict
+        achieved_goal = observation[..., :self.goal_dim].astype(np.float32)
+        out = {
+            "observation": observation.astype(np.float32),
+            "desired_goal": self.goal.astype(np.float32),
+            "achieved_goal": achieved_goal,
+        }
+        
+        # Modern Gymnasium returns (obs, info)
+        return out, {}
 
     def compute_rew(self, state, goal, info):
+        """Compute reward between state and goal"""
         assert state.shape == goal.shape
         dist = np.linalg.norm(state - goal, axis=-1)
         return -(dist > self.distance_threshold).astype(np.float32)
@@ -81,12 +130,17 @@ def create_maze_env(
     random_start=True,
     goal_args=[],
     maze_args=[],
+    render_mode=None,
 ):
+    """Factory function to create maze environment"""
     n_bins = 0
     manual_collision = False
+    
+    # Parse environment name
     if env_name.startswith("Ego"):
         n_bins = 8
         env_name = env_name[3:]
+    
     if env_name.startswith("Ant"):
         manual_collision = True
         cls = AntMazeEnv
@@ -100,9 +154,11 @@ def create_maze_env(
     else:
         assert False, "unknown env %s" % env_name
 
+    # Set maze configuration
     maze_id = None
     observe_blocks = False
     put_spin_near_agent = False
+    
     if env_name == "Maze":
         maze_id = "Maze"
     elif env_name == "Maze1":
@@ -130,6 +186,7 @@ def create_maze_env(
     else:
         raise ValueError("Unknown maze environment %s" % env_name)
 
+    # Create MuJoCo environment kwargs
     gym_mujoco_kwargs = {
         "maze_id": maze_id,
         "n_bins": n_bins,
@@ -139,9 +196,134 @@ def create_maze_env(
         "manual_collision": manual_collision,
         "maze_size_scaling": maze_size_scaling,
     }
+    
+    # Create the environment
     gym_env = cls(**gym_mujoco_kwargs)
     gym_env.reset()
-    goal_args = np.array(goal_args) / 8 * maze_size_scaling
-    maze_args = np.array(maze_args) / 8 * maze_size_scaling
+    
+    # Scale goal and maze arguments
+    goal_args = np.array(goal_args, dtype=np.float32) / 8 * maze_size_scaling
+    maze_args = np.array(maze_args, dtype=np.float32) / 8 * maze_size_scaling
 
-    return GoalWrapper(gym_env, maze_size_scaling, random_start, *goal_args, *maze_args)
+    # Wrap the environment
+    return GoalWrapper(
+        gym_env, 
+        maze_size_scaling, 
+        random_start, 
+        *goal_args, 
+        *maze_args,
+        render_mode=render_mode,
+    )
+
+def register_maze_envs():
+    """Register all maze environments"""
+    robots = ["Point", "Ant"]
+    task_types = [
+        "Maze",
+        "Maze1",
+        "Push",
+        "Fall",
+        "Block",
+        "BlockMaze",
+        "MazeL",
+        "MazeS",
+        "MazeW",
+        "MazeP",
+    ]
+    all_name = [x + y for x in robots for y in task_types]
+    for name_t in all_name:
+        for Test in ["", "Test"]:
+            maze_args = [[-4, -4], [20, 20]]
+            max_timestep = 200
+            random_start = True
+            if name_t[-4:] == "Maze" or name_t[-4:] == "aze1" or name_t[-4:] == "azeL":
+                goal_args = [[-4, -4], [20, 20]]
+            if Test == "Test":
+                goal_args = [[0.0, 16.0], [1e-3, 16 + 1e-3]]
+                if name_t[-4:] == "azeL":
+                    goal_args = [[16.0, 16.0], [16 + 1e-3, 16 + 1e-3]]
+                random_start = False
+                max_timestep = 500
+
+            if name_t[-4:] == "azeS":
+                max_timestep = 400
+                goal_args = [[-4, -4], [36, 36]]
+                maze_args = [[-4, -4], [36, 36]]
+                if Test == "Test":
+                    goal_args = [[32.0, 32.0], [32 + 1e-3, 32 + 1e-3]]
+                    random_start = False
+                    max_timestep = 1000
+
+            if name_t[-4:] == "azeW":
+                max_timestep = 400
+                goal_args = [[-4, -12], [36, 28]]
+                maze_args = [[-4, -12], [36, 28]]
+                if Test == "Test":
+                    goal_args = [[0.0, 16.0], [0 + 1e-3, 16 + 1e-3]]
+                    random_start = False
+                    max_timestep = 1000
+
+            if name_t[-4:] == "azeP":
+                max_timestep = 400
+                goal_args = [[-12, -4], [28, 36]]
+                maze_args = [[-12, -4], [28, 36]]
+                if Test == "Test":
+                    goal_args = [[16.0, 0.0], [16.0 + 1e-3, 0.0 + 1e-3]]
+                    random_start = False
+                    max_timestep = 1000
+
+            gym.register(
+                id=name_t + Test + "-v0",
+                entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
+                kwargs={
+                    "env_name": name_t,
+                    "goal_args": goal_args,
+                    "maze_size_scaling": 8,
+                    "random_start": random_start,
+                    "maze_args": maze_args,
+                },
+                max_episode_steps=max_timestep,
+            )
+
+            gym.register(
+                id=name_t + Test + "-v1",
+                entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
+                kwargs={
+                    "env_name": name_t,
+                    "goal_args": goal_args,
+                    "maze_size_scaling": 4,
+                    "random_start": random_start,
+                    "maze_args": maze_args,
+                },
+                max_episode_steps=max_timestep,
+            )
+
+            gym.register(
+                id=name_t + Test + "-v2",
+                entry_point="goal_env.mujoco.create_maze_env:create_maze_env",
+                kwargs={
+                    "env_name": name_t,
+                    "goal_args": goal_args,
+                    "maze_size_scaling": 2,
+                    "random_start": random_start,
+                    "maze_args": maze_args,
+                },
+                max_episode_steps=max_timestep,
+            )
+
+def register_fetch_envs():
+    """Register fetch environments"""
+    gym.register(
+        id="Reacher3D-v0",
+        entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
+        kwargs={"env_name": "Reacher3D-v0"},
+        max_episode_steps=100,
+    )
+
+    gym.register(
+        id="Pusher-v0",
+        entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
+        kwargs={"env_name": "Pusher-v0"},
+        max_episode_steps=100,
+    )
+    

@@ -1,10 +1,10 @@
 from .reacher import Reacher3DEnv
 from .pusher import PusherEnv
 from collections import OrderedDict
-import gym
+import gymnasium as gym
 import numpy as np
-from gym import Wrapper
-from gym.envs.registration import EnvSpec
+from gymnasium import Wrapper
+from gymnasium.envs.registration import EnvSpec
 
 
 class GoalWrapper(Wrapper):
@@ -16,13 +16,16 @@ class GoalWrapper(Wrapper):
         seed=0,
         subgoal_repr="subspace",
         mask_goal_in_obs=False,
+        render_mode=None,
     ):
         super(GoalWrapper, self).__init__(env)
         self.env_name = env_name
+        self._render_mode = render_mode
+        
         ob_space = env.observation_space
-        high = np.array([np.inf, np.inf, np.inf])
+        high = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
         low = -high
-        goal_space = gym.spaces.Box(low=low, high=high)
+        goal_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
 
         if subgoal_repr == "subspace":
             achieved_goal_space = goal_space
@@ -47,7 +50,9 @@ class GoalWrapper(Wrapper):
         self.mask_goal_in_obs = mask_goal_in_obs
 
     def step(self, action):
-        obs, sparse_reward, done, info = self.env.step(action)
+        # Modern step returns 5 values
+        obs, sparse_reward, terminated, truncated, info = self.env.step(action)
+        
         if self.env_name == "Reacher3D-v0":
             achieved_goal = self.env.get_EE_pos(obs[None]).squeeze()
         elif self.env_name == "Pusher-v0":
@@ -59,26 +64,34 @@ class GoalWrapper(Wrapper):
             obs[7:10] = 0.0
 
         out = {
-            "observation": obs,
-            "desired_goal": self.env.goal,
-            "achieved_goal": achieved_goal,
+            "observation": obs.astype(np.float32),
+            "desired_goal": self.env.goal.astype(np.float32),
+            "achieved_goal": achieved_goal.astype(np.float32),
         }
 
         if self.reward_shaping == "dense":
             reward = -np.sum(np.square(achieved_goal - self.env.goal))
             reward -= 0.0001 * np.square(action).sum()
+            reward = float(reward)
         elif self.reward_shaping == "sparse":
-            reward = sparse_reward
+            reward = float(sparse_reward)
         else:
             raise NotImplementedError
 
-        # info['is_success'] = \
-        #    np.sqrt(np.sum(np.square(self.get_EE_pos(obs[None]) - self.goal))) <= self.distance_threshold
+        # Modern Gymnasium: (obs, reward, terminated, truncated, info)
+        return out, reward, terminated, truncated, info
 
-        return out, reward, done, info
-
-    def reset(self):
-        obs = self.env.reset()
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            np.random.seed(seed)
+        
+        result = self.env.reset(seed=seed, options=options)
+        if isinstance(result, tuple):
+            obs, info = result
+        else:
+            obs = result
+            info = {}
+        
         if self.env_name == "Reacher3D-v0":
             achieved_goal = self.env.get_EE_pos(obs[None]).squeeze()
         elif self.env_name == "Pusher-v0":
@@ -90,12 +103,19 @@ class GoalWrapper(Wrapper):
             obs[7:10] = 0.0
 
         out = {
-            "observation": obs,
-            "desired_goal": self.env.goal,
-            "achieved_goal": achieved_goal,
+            "observation": obs.astype(np.float32),
+            "desired_goal": self.env.goal.astype(np.float32),
+            "achieved_goal": achieved_goal.astype(np.float32),
         }
 
-        return out
+        return out, {}
+    def render(self):
+        """Modern Gymnasium render method"""
+        if self._render_mode == "human":
+            return self.env.render()
+        elif self._render_mode == "rgb_array":
+            return self.env.render()
+        return None
 
 
 def create_fetch_env(
@@ -104,6 +124,7 @@ def create_fetch_env(
     reward_shaping="dense",
     subgoal_repr="subspace",
     mask_goal_in_obs=False,
+    render_mode=None,
 ):
     if env_name == "Reacher3D-v0":
         cls = Reacher3DEnv
@@ -112,14 +133,10 @@ def create_fetch_env(
     else:
         raise NotImplementedError
 
-    """
-    gym_mujoco_kwargs = {
-        'seed': seed,
-    }
-    gym_env = cls(**gym_mujoco_kwargs)
-    """
-    gym_env = cls()
+    # Create environment with render_mode
+    gym_env = cls(render_mode=render_mode)
     gym_env.reset()
+    
     return GoalWrapper(
         gym_env,
         env_name,
@@ -127,4 +144,22 @@ def create_fetch_env(
         seed=seed,
         subgoal_repr=subgoal_repr,
         mask_goal_in_obs=mask_goal_in_obs,
+        render_mode=render_mode,
+    )
+
+
+def register_fetch_envs():
+    """Register fetch environments"""
+    gym.register(
+        id="Reacher3D-v0",
+        entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
+        kwargs={"env_name": "Reacher3D-v0"},
+        max_episode_steps=100,
+    )
+
+    gym.register(
+        id="Pusher-v0",
+        entry_point="goal_env.mujoco.create_fetch_env:create_fetch_env",
+        kwargs={"env_name": "Pusher-v0"},
+        max_episode_steps=100,
     )

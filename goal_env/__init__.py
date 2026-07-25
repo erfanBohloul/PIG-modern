@@ -1,8 +1,8 @@
 import sys
-
 sys.path.append("../")
-from gym.envs.registration import register
-import gym
+
+import gymnasium as gym
+from gymnasium.envs.registration import register
 from goal_env.bitflip import BitFlipEnv
 from goal_env.fourroom import FourRoom, FourRoom2, FourRoom3, FourRoom4
 from goal_env.mountaincar import MountainCarEnv
@@ -15,7 +15,8 @@ from goal_env.plane import (
 )
 from goal_env.goal_plane_env import GoalPlane
 
-register(
+# Register environments using the modern Gymnasium API
+gym.register(
     id="Bitflip-v0",
     entry_point="goal_env.bitflip:BitFlipEnv",
     kwargs={"num_bits": 11},
@@ -24,7 +25,7 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="FourRoom-v0",
     entry_point="goal_env.fourroom:FourRoom",
     kwargs={"goal_type": "fix_goal"},
@@ -33,7 +34,7 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="FourRoom-v1",
     entry_point="goal_env.fourroom:FourRoom2",
     kwargs={"goal_type": "fix_goal"},
@@ -42,7 +43,7 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="FourRoom-v2",
     entry_point="goal_env.fourroom:FourRoom3",
     kwargs={"goal_type": "fix_goal"},
@@ -51,7 +52,7 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="FourRoom-v4",
     entry_point="goal_env.fourroom:FourRoom4",
     kwargs={"goal_type": "fix_goal"},
@@ -60,7 +61,7 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="mcar-v0",
     entry_point="goal_env.mountaincar:MountainCarEnv",
     kwargs={"goal_dim": 1},
@@ -69,12 +70,13 @@ register(
     nondeterministic=False,
 )
 
-register(
+gym.register(
     id="Plane-v0",
     entry_point="goal_env.plane:NaivePlane5",
+    kwargs={"render_mode": None},  # Add render_mode to avoid warnings
 )
 
-register(
+gym.register(
     id="GoalPlane-v0",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=50,
@@ -88,7 +90,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlaneMid-v0",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=50,
@@ -103,7 +105,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlaneHard-v0",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=50,
@@ -118,7 +120,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlaneEasy-v0",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=50,
@@ -133,7 +135,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlaneTest-v0",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=50,
@@ -148,7 +150,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlane-v1",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=100,
@@ -162,7 +164,7 @@ register(
     },
 )
 
-register(
+gym.register(
     id="GoalPlaneTest-v1",
     entry_point="goal_env.goal_plane_env:GoalPlane",
     max_episode_steps=100,

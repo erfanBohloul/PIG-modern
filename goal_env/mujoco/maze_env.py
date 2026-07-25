@@ -5,20 +5,23 @@ import tempfile
 import xml.etree.ElementTree as ET
 import math
 import numpy as np
-import gym
+import gymnasium as gym
+from gymnasium import spaces
 from . import maze_env_utils
-from gym.utils import seeding
 
 # Directory that contains mujoco xml files.
-# MODEL_DIR = '/home/hza/ToolBox/tools/fancy/data/mujoco/assets'
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
 
 class MazeEnv(gym.Env):
+    """Modernized Maze Environment for MuJoCo"""
+    
     MODEL_CLASS = None
-
     MAZE_HEIGHT = None
     MAZE_SIZE_SCALING = None
+    
+    # Modern Gymnasium metadata
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
         self,
@@ -33,14 +36,18 @@ class MazeEnv(gym.Env):
         top_down_view=False,
         manual_collision=False,
         goal=None,
+        render_mode=None,
         *args,
         **kwargs
     ):
+        super().__init__()
+        
         self._maze_id = maze_id
+        self.render_mode = render_mode
 
         model_cls = self.__class__.MODEL_CLASS
         if model_cls is None:
-            raise "MODEL_CLASS unspecified!"
+            raise ValueError("MODEL_CLASS unspecified!")
         xml_path = os.path.join(MODEL_DIR, model_cls.FILE)
         tree = ET.parse(xml_path)
         worldbody = tree.find(".//worldbody")
@@ -72,8 +79,6 @@ class MazeEnv(gym.Env):
             (x - torso_x, y - torso_y) for x, y in self._find_all_robots()
         ]
 
-        # self._xy_to_rowcol = lambda x, y: (2 + (y + size_scaling / 2) / size_scaling,
-        #                                   2 + (x + size_scaling / 2) / size_scaling)
         # walls (immovable), chasms (fall), movable blocks
         self._view = np.zeros([5, 5, 3])
 
@@ -247,7 +252,16 @@ class MazeEnv(gym.Env):
         _, file_path = tempfile.mkstemp(text=True, suffix=".xml")
         tree.write(file_path)
 
-        self.wrapped_env = model_cls(*args, file_path=file_path, **kwargs)
+        # Pass render_mode to wrapped environment
+        if 'render_mode' in kwargs:
+            kwargs['render_mode'] = render_mode
+        
+        # Create the wrapped environment
+        self.wrapped_env = model_cls(*args, file_path=file_path, render_mode=render_mode, **kwargs)
+        
+        # Set observation space as an attribute (not property)
+        self._observation_space = self._get_observation_space()
+        
         self.GOAL = goal
         if self.GOAL is not None:
             self.GOAL = self.unwrapped._rowcol_to_xy(*self.GOAL)
@@ -345,11 +359,7 @@ class MazeEnv(gym.Env):
         for block_name, block_type in self.movable_blocks:
             block_x, block_y = self.wrapped_env.get_body_com(block_name)[:2]
             update_view(block_x, block_y, 2)
-        """    
-        import cv2
-        cv2.imshow('x.jpg', cv2.resize(np.uint8(self._view*255), (512, 512), interpolation = cv2.INTER_CUBIC) )
-        cv2.waitKey(0)
-        """
+        
         return self._view
 
     def get_range_sensor_obs(self):
@@ -458,7 +468,6 @@ class MazeEnv(gym.Env):
 
     def _get_obs(self):
         wrapped_obs = self.wrapped_env._get_obs()
-        # print("ant obs", wrapped_obs)
         if self._top_down_view:
             view = [self.get_top_down_view().flat]
         else:
@@ -473,38 +482,57 @@ class MazeEnv(gym.Env):
             )
 
         range_sensor_obs = self.get_range_sensor_obs()
-        # print("sensor obs", range_sensor_obs)
         return np.concatenate(
             [wrapped_obs, range_sensor_obs.flat] + view + [[self.t * 0.001]]
         )
-        # return np.concatenate([wrapped_obs, range_sensor_obs.flat] + view)
 
-    def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
-        return [seed]
+    def _get_observation_space(self):
+        """Get the observation space"""
+        shape = self._get_obs().shape
+        high = np.inf * np.ones(shape, dtype=np.float32)
+        low = -high
+        return spaces.Box(low, high, dtype=np.float32)
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        """Modern Gymnasium reset method"""
+        # Handle seeding
+        if seed is not None:
+            np.random.seed(seed)
+            if hasattr(self.wrapped_env, 'reset'):
+                self.wrapped_env.reset(seed=seed)
+        
         self.t = 0
         self.trajectory = []
         self.wrapped_env.reset()
         if len(self._init_positions) > 1:
-            xy = self._init_positions[self.np_random.randint(len(self._init_positions))]
+            xy = self._init_positions[np.random.randint(len(self._init_positions))]
             self.wrapped_env.set_xy(xy)
-        return self._get_obs()
+        
+        obs = self._get_obs().astype(np.float32)
+        # Modern Gymnasium returns (obs, info)
+        return obs, {}
 
     @property
     def viewer(self):
         return self.wrapped_env.viewer
 
-    def render(self, *args, **kwargs):
-        return self.wrapped_env.render(*args, **kwargs)
+    def render(self):
+        """Modern Gymnasium render method"""
+        if self.render_mode is None:
+            return
+        
+        if self.render_mode == "human":
+            return self.wrapped_env.render()
+        elif self.render_mode == "rgb_array":
+            return self.wrapped_env.render()
+        return None
 
     @property
     def observation_space(self):
-        shape = self._get_obs().shape
-        high = np.inf * np.ones(shape)
-        low = -high
-        return gym.spaces.Box(low, high)
+        """Get observation space"""
+        if not hasattr(self, '_observation_space'):
+            self._observation_space = self._get_observation_space()
+        return self._observation_space
 
     @property
     def action_space(self):
@@ -541,7 +569,6 @@ class MazeEnv(gym.Env):
                     miny = i * size_scaling - size_scaling * 0.5 - self._init_torso_y
                     maxy = i * size_scaling + size_scaling * 0.5 - self._init_torso_y
                     if minx <= x <= maxx and miny <= y <= maxy:
-                        # print(i, j, minx, maxx, miny, maxy, x, y)
                         return True
         return False
 
@@ -554,22 +581,34 @@ class MazeEnv(gym.Env):
         return (minx + maxx) / 2, (miny + maxy) / 2
 
     def step(self, action):
+        """Modern Gymnasium step method"""
         self.t += 1
         assert not self._is_in_collision(
             self.wrapped_env.get_xy()
         ), self.wrapped_env.get_xy()
+        
         if self._manual_collision:
             old_pos = self.wrapped_env.get_xy()
-            inner_next_obs, inner_reward, done, info = self.wrapped_env.step(action)
+            inner_next_obs, inner_reward, terminated, truncated, info = self.wrapped_env.step(action)
             new_pos = self.wrapped_env.get_xy()
             if self._is_in_collision(new_pos):
                 self.wrapped_env.set_xy(old_pos)
         else:
-            inner_next_obs, inner_reward, done, info = self.wrapped_env.step(action)
-        next_obs = self._get_obs()
-        done = False
+            inner_next_obs, inner_reward, terminated, truncated, info = self.wrapped_env.step(action)
+        
+        next_obs = self._get_obs().astype(np.float32)
+        
+        # Check if goal is reached
         if self.GOAL is not None:
-            # print(self.EPS, next_obs[:2], self.GOAL[:2])
-            done = bool(((next_obs[:2] - self.GOAL[:2]) ** 2).sum() < self.EPS)
-            inner_reward = int(done)
-        return next_obs, inner_reward, done, info
+            terminated = bool(((next_obs[:2] - self.GOAL[:2]) ** 2).sum() < self.EPS)
+            inner_reward = float(1.0 if terminated else 0.0)
+        else:
+            inner_reward = float(inner_reward)
+        
+        # Modern Gymnasium: (obs, reward, terminated, truncated, info)
+        return next_obs, inner_reward, terminated, truncated, info
+    
+    def close(self):
+        """Close the environment"""
+        if hasattr(self.wrapped_env, 'close'):
+            self.wrapped_env.close()

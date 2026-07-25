@@ -1,15 +1,16 @@
 import math
 import numpy as np
 
-import gym
-from gym import spaces
-from gym.utils import seeding
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 
 
 class MountainCarEnv(gym.Env):
-    metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 30}
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(self, goal_dim=1):
+        super().__init__()
         self.min_position = -1.2
         self.max_position = 0.6
         self.max_speed = 0.07
@@ -25,7 +26,8 @@ class MountainCarEnv(gym.Env):
         self.goal_dim = goal_dim
 
         self.action_space = spaces.Discrete(3)
-        self.observation_space = {
+        # Modern Gymnasium uses spaces.Dict for dict spaces
+        self.observation_space = spaces.Dict({
             "achieved_goal": spaces.Box(
                 self.low[: self.goal_dim], self.high[: self.goal_dim], dtype=np.float32
             ),
@@ -33,20 +35,33 @@ class MountainCarEnv(gym.Env):
                 self.low[: self.goal_dim], self.high[: self.goal_dim], dtype=np.float32
             ),
             "observation": spaces.Box(self.low, self.high, dtype=np.float32),
-        }
+        })
 
-        self.seed()
+        self.seed_value = None
 
     def get_obs(self):
         return {
-            "achieved_goal": np.array(self.state)[: self.goal_dim],
-            "desired_goal": np.array([self.goal_position, 0][: self.goal_dim]),
-            "observation": np.array(self.state),
+            "achieved_goal": np.array(self.state)[: self.goal_dim].astype(np.float32),
+            "desired_goal": np.array([self.goal_position, 0][: self.goal_dim]).astype(np.float32),
+            "observation": np.array(self.state).astype(np.float32),
         }
 
     def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
+        self.seed_value = seed
+        if seed is not None:
+            np.random.seed(seed)
         return [seed]
+
+    def reset(self, seed=None, options=None):
+        # Modern Gymnasium reset signature
+        if seed is not None:
+            self.seed(seed)
+        elif self.seed_value is not None:
+            np.random.seed(self.seed_value)
+            
+        self.state = np.array([np.random.uniform(low=-0.6, high=-0.4), 0])
+        # Return obs and info dict
+        return self.get_obs(), {}
 
     def step(self, action):
         assert self.action_space.contains(action), "%r (%s) invalid" % (
@@ -62,25 +77,22 @@ class MountainCarEnv(gym.Env):
         if position == self.min_position and velocity < 0:
             velocity = 0
 
-        done = bool(position >= self.goal_position)
+        terminated = bool(position >= self.goal_position)
         reward = -1.0
-        if done:
+        if terminated:
             reward = 0.0
             info["is_success"] = True
 
         self.state = (position, velocity)
-        return self.get_obs(), reward, done, info
-        # return np.array(self.state), reward, done, {}
-
-    def reset(self):
-        self.state = np.array([self.np_random.uniform(low=-0.6, high=-0.4), 0])
-        return self.get_obs()
-        # return np.array(self.state)
+        # Modern Gymnasium: (obs, reward, terminated, truncated, info)
+        return self.get_obs(), reward, terminated, False, info
 
     def _height(self, xs):
         return np.sin(3 * xs) * 0.45 + 0.55
 
-    def render(self, mode="human"):
+    def render(self):
+        # Modern Gymnasium render method doesn't take mode parameter
+        # The render mode is set when creating the environment
         screen_width = 600
         screen_height = 400
 
@@ -90,7 +102,7 @@ class MountainCarEnv(gym.Env):
         carheight = 20
 
         if self.viewer is None:
-            from gym.envs.classic_control import rendering
+            from gymnasium.envs.classic_control import rendering
 
             self.viewer = rendering.Viewer(screen_width, screen_height)
             xs = np.linspace(self.min_position, self.max_position, 100)
@@ -140,7 +152,7 @@ class MountainCarEnv(gym.Env):
         )
         self.cartrans.set_rotation(math.cos(3 * pos))
 
-        return self.viewer.render(return_rgb_array=mode == "rgb_array")
+        return self.viewer.render(return_rgb_array=self.render_mode == "rgb_array")
 
     def get_keys_to_action(self):
         # control with left and right arrow keys
@@ -158,6 +170,7 @@ class MountainCarEnv(gym.Env):
         :param goal:
         :return:
         """
+        pass
 
     def get_pairwise(self, state, target):
         """
@@ -166,3 +179,4 @@ class MountainCarEnv(gym.Env):
         :param target:
         :return:
         """
+        pass
