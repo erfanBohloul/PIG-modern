@@ -4,6 +4,14 @@ Implementation of [Imitating Graph-Based Planning with Goal-Conditioned Policies
 
 Our code is based on official implementation of [Mapping State Space](https://github.com/FangchenLiu/map_planner).
 
+## Updates
+
+This repository has been modernized to use:
+- **Gymnasium** (v1.3.0+) instead of Gym (v0.18.0)
+- **MuJoCo** (v3.0.0+) instead of mujoco_py
+- **Python 3.8+** (tested on 3.10, 3.11, 3.12)
+- Modern PyTorch (v2.0.0+)
+
 ## Instructions
 
 Install dependencies
