@@ -9,6 +9,9 @@ from algos.replay_buffer import replay_buffer
 from algos.her import her_sampler
 from planner.goal_plan import *
 import utils
+import gymnasium as gym
+import numpy as np
+import torch
 
 
 class ddpg_agent:
@@ -108,6 +111,12 @@ class ddpg_agent:
 
         self.can_jump = False
         self.goal_loss = 0
+        self.jump_ref_goal_loss = torch.zeros(1).to(self.device)
+        self.weighted_multi_path_fraction = 0.0
+        self.weighted_distance_span = 0.0
+        self.weighted_entropy = 1.0
+        self.weighted_max_weight = 0.0
+        self.weighted_beta_effective = 0.0
 
     def adjust_lr_actor(self, epoch):
         lr_actor = self.args.lr_actor * (0.5 ** (epoch // self.args.lr_decay_actor))
@@ -128,7 +137,8 @@ class ddpg_agent:
             if epoch > 0 and epoch % self.args.lr_decay_critic == 0:
                 self.adjust_lr_critic(epoch)
 
-            ep_obs, ep_ag, ep_g, ep_actions, ep_sg, ep_sg_series, ep_path_mask = (
+            ep_obs, ep_ag, ep_g, ep_actions, ep_sg, ep_sg_series, ep_sg_dists, ep_path_mask = (
+                [],
                 [],
                 [],
                 [],
@@ -137,7 +147,8 @@ class ddpg_agent:
                 [],
                 [],
             )
-            observation, _ = self.env.reset()
+            # Modern Gymnasium: reset returns (obs, info)
+            observation, info = self.env.reset()
             obs = observation["observation"]
             ag = observation["achieved_goal"]
             g = observation["desired_goal"]
@@ -153,20 +164,23 @@ class ddpg_agent:
                             act_obs,
                             act_g,
                             self.args.plan_budget,
-                            ref_loss=self.goal_loss,
+                            ref_loss=getattr(self, "jump_ref_goal_loss", self.goal_loss),
                             jump=self.args.jump,
                         )
                         subgoal = self.planner_policy.subgoal
                         subgoal_series = self.planner_policy.goal_series
+                        subgoal_dist_series = self.planner_policy.goal_distance_series
                         path_len = self.planner_policy.path_len
                     else:
                         action = self.explore_policy(act_obs, act_g)
                         subgoal = g
                         subgoal_series = g.reshape(1, -1)
                         subgoal_series = np.repeat(subgoal_series, self.args.plan_budget, axis=0)
+                        subgoal_dist_series = np.ones(self.args.plan_budget, dtype=np.float32)
                         path_len = 1
                     # feed the actions into the environment
-                observation_new, _, terminated, truncated, info = self.env.step(action)
+                # Modern Gymnasium: step returns 5 values
+                observation_new, reward, terminated, truncated, info = self.env.step(action)
                 self.env_timestep += 1
                 obs_new = observation_new["observation"]
                 ag_new = observation_new["achieved_goal"]
@@ -177,6 +191,7 @@ class ddpg_agent:
                 ep_actions.append(action.copy())
                 ep_sg.append(subgoal.copy())
                 ep_sg_series.append(subgoal_series.copy())
+                ep_sg_dists.append(subgoal_dist_series.copy())
                 ep_path_mask.append(
                     np.array([1] * path_len + [0] * (self.args.plan_budget - path_len))
                 )
@@ -192,9 +207,10 @@ class ddpg_agent:
             mb_actions = np.array([ep_actions])
             mb_sg = np.array([ep_sg])
             mb_sg_series = np.array([ep_sg_series])
+            mb_sg_dists = np.array([ep_sg_dists])
             mb_path_len = np.array([ep_path_mask])
             self.buffer.store_episode(
-                [mb_obs, mb_ag, mb_g, mb_actions, mb_sg, mb_sg_series, mb_path_len]
+                [mb_obs, mb_ag, mb_g, mb_actions, mb_sg, mb_sg_series, mb_sg_dists, mb_path_len]
             )
             for n_batch in range(self.args.n_batches):
                 actor_loss, critic_loss, goal_loss = self._update_network()
@@ -224,6 +240,13 @@ class ddpg_agent:
                         test_no_plan_success_rate,
                     )
                 )
+                print("[weighted-debug] beta_eff={:.4f}, multi_path={:.4f}, distance_span={:.4f}, entropy={:.4f}, max_weight={:.4f}".format(
+                    getattr(self, "weighted_beta_effective", 0.0),
+                    getattr(self, "weighted_multi_path_fraction", 0.0),
+                    getattr(self, "weighted_distance_span", 0.0),
+                    getattr(self, "weighted_entropy", 1.0),
+                    getattr(self, "weighted_max_weight", 0.0),
+                ))
                 # torch.save([self.critic_network.state_dict()], \
                 #            self.model_path + '/critic_model_' +str(epoch) +'.pt')
                 # torch.save([self.actor_network.state_dict()], \
@@ -354,33 +377,173 @@ class ddpg_agent:
         # start to update the network
 
         goal_loss = torch.zeros(1).to(self.device)
+        goal_loss_uniform = torch.zeros(1).to(self.device)
         if self.buffer.current_size > self.args.initial_sample:
+            # WEIGHTED-PIG-V2 START
+            # The final-goal policy receives gradients; subgoal policies are stop-gradient teachers.
             actions_g = self.actor_network(obs_cur, g_cur)
+            sg_series = torch.tensor(
+                transitions["sg_series"], dtype=torch.float32
+            ).to(self.device)
+            path_mask = torch.tensor(
+                transitions["path_mask"], dtype=torch.float32
+            ).to(self.device)
 
             with torch.no_grad():
-                sg_series = transitions["sg_series"]
-                sg_series = torch.tensor(sg_series, dtype=torch.float32).to(self.device)
                 actions_sg_list = []
-
                 for i in range(sg_series.shape[1]):
-                    sg_i = sg_series[:, i, :]
-                    actions_sg_i = self.actor_network(obs_cur, sg_i)
-                    actions_sg_list.append(actions_sg_i)
+                    actions_sg_list.append(
+                        self.actor_network(obs_cur, sg_series[:, i, :])
+                    )
                 actions_sg = torch.stack(actions_sg_list, dim=1)
 
-                path_mask = transitions["path_mask"]
-                path_mask = torch.tensor(path_mask, dtype=torch.float32).to(self.device)
-                path_mask = path_mask.unsqueeze(dim=2).repeat(1, 1, actions_g.shape[1])
+            actions_g_expand = actions_g.unsqueeze(1).repeat(
+                1, self.args.plan_budget, 1
+            )
+            per_subgoal_loss = ((actions_g_expand - actions_sg) ** 2).mean(dim=2)
 
-                actions_g = actions_g.unsqueeze(dim=1).repeat(
-                    1, self.args.plan_budget, 1
+            valid = path_mask > 0.0
+            valid_count = path_mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+            uniform_prob = path_mask / valid_count
+            prob_weights = uniform_prob
+            beta_effective = 0.0
+            distance_span_value = 0.0
+
+            weighting = getattr(self.args, "goal_loss_weighting", "uniform")
+            beta_target = float(getattr(self.args, "goal_loss_beta", 0.0))
+
+            if weighting != "uniform" and beta_target > 0.0:
+                if weighting == "graph":
+                    if "sg_dists" not in transitions:
+                        raise KeyError(
+                            "Weighted graph loss needs transitions['sg_dists']. "
+                            "Patch planner and replay buffer before training."
+                        )
+                    distances = torch.tensor(
+                        transitions["sg_dists"], dtype=torch.float32
+                    ).to(self.device)
+                elif weighting == "euclidean":
+                    ag_cur = torch.tensor(
+                        transitions["ag"], dtype=torch.float32
+                    ).to(self.device)
+                    distances = torch.norm(
+                        sg_series - ag_cur.unsqueeze(1), dim=2
+                    )
+                elif weighting == "index":
+                    distances = torch.arange(
+                        1,
+                        self.args.plan_budget + 1,
+                        dtype=torch.float32,
+                        device=self.device,
+                    ).unsqueeze(0).repeat(path_mask.shape[0], 1)
+                else:
+                    raise ValueError(
+                        "Unknown goal_loss_weighting: {}".format(weighting)
+                    )
+
+                # Protect the softmax from NaN/Inf and normalize each planned path.
+                distances = torch.where(
+                    torch.isfinite(distances),
+                    distances,
+                    torch.zeros_like(distances),
                 )
-            goal_loss = (actions_g - actions_sg) ** 2
+                masked_min = distances.masked_fill(~valid, 1e9).min(
+                    dim=1, keepdim=True
+                )[0]
+                masked_max = distances.masked_fill(~valid, -1e9).max(
+                    dim=1, keepdim=True
+                )[0]
+                span = (masked_max - masked_min).clamp_min(1e-6)
 
-            goal_loss *= path_mask
-            goal_loss = torch.sum(goal_loss) / torch.sum(path_mask)
+                if getattr(
+                    self.args, "goal_loss_distance_normalization", "path"
+                ) == "path":
+                    normalized_distances = (distances - masked_min) / span
+                else:
+                    normalized_distances = distances
+
+                warmup = int(getattr(self.args, "goal_loss_warmup_steps", 0))
+                ramp = max(
+                    int(getattr(self.args, "goal_loss_beta_ramp_steps", 1)), 1
+                )
+                beta_progress = min(
+                    max((float(self.env_timestep) - warmup) / float(ramp), 0.0),
+                    1.0,
+                )
+                beta_effective = beta_target * beta_progress
+
+                logits = -beta_effective * normalized_distances
+                logits = logits.masked_fill(~valid, -1e9)
+                distance_prob = torch.softmax(logits, dim=1)
+                distance_prob = distance_prob * path_mask
+                distance_prob = distance_prob / distance_prob.sum(
+                    dim=1, keepdim=True
+                ).clamp_min(1e-8)
+
+                uniform_mix = float(
+                    getattr(self.args, "goal_loss_uniform_mix", 0.25)
+                )
+                uniform_mix = min(max(uniform_mix, 0.0), 1.0)
+                prob_weights = (
+                    uniform_mix * uniform_prob
+                    + (1.0 - uniform_mix) * distance_prob
+                )
+                prob_weights = prob_weights * path_mask
+                prob_weights = prob_weights / prob_weights.sum(
+                    dim=1, keepdim=True
+                ).clamp_min(1e-8)
+                distance_span_value = float(
+                    ((masked_max - masked_min) * (valid_count > 1).float())
+                    .mean()
+                    .detach()
+                    .cpu()
+                    .item()
+                )
+
+            # Critical correction:
+            # multiply by valid_count and divide globally so beta=0 exactly
+            # recovers the official PIG reduction, even when path lengths differ.
+            relative_weights = prob_weights * valid_count
+            denominator = path_mask.sum().clamp_min(1.0)
+            goal_loss = (
+                relative_weights * per_subgoal_loss * path_mask
+            ).sum() / denominator
+            goal_loss_uniform = (
+                per_subgoal_loss * path_mask
+            ).sum() / denominator
+
             actor_loss += goal_loss * self.args.lambda_goal_loss
 
+            # Keep subgoal skipping calibrated to the original/uniform PIG loss.
+            self.jump_ref_goal_loss = goal_loss_uniform.detach()
+
+            with torch.no_grad():
+                entropy = -(
+                    prob_weights.clamp_min(1e-8)
+                    * torch.log(prob_weights.clamp_min(1e-8))
+                    * path_mask
+                ).sum(dim=1)
+                entropy_den = torch.log(valid_count.squeeze(1).clamp_min(2.0))
+                multi = valid_count.squeeze(1) > 1.0
+                if multi.any():
+                    normalized_entropy = (
+                        entropy[multi] / entropy_den[multi]
+                    ).mean()
+                else:
+                    normalized_entropy = torch.ones(1).to(self.device)
+
+                self.weighted_multi_path_fraction = float(
+                    multi.float().mean().cpu().item()
+                )
+                self.weighted_distance_span = distance_span_value
+                self.weighted_entropy = float(
+                    normalized_entropy.detach().cpu().item()
+                )
+                self.weighted_max_weight = float(
+                    prob_weights.max(dim=1)[0].mean().detach().cpu().item()
+                )
+                self.weighted_beta_effective = float(beta_effective)
+            # WEIGHTED-PIG-V2 END
         self.actor_optim.zero_grad()
         actor_loss.backward()
         self.actor_optim.step()
@@ -399,14 +562,16 @@ class ddpg_agent:
         total_success_rate = []
         for _ in range(self.args.n_test_rollouts):
             per_success_rate = []
-            observation, _ = self.env.reset()
+            # Modern Gymnasium: reset returns (obs, info)
+            observation, info = self.env.reset()
             obs = observation["observation"]
             g = observation["desired_goal"]
             for _ in range(self.env_params["max_timesteps"]):
                 with torch.no_grad():
                     act_obs, act_g = self._preproc_inputs(obs, g)
                     actions = policy(act_obs, act_g)
-                observation_new, _, terminated, truncated, info = self.env.step(actions)
+                # Modern Gymnasium: step returns 5 values
+                observation_new, reward, terminated, truncated, info = self.env.step(actions)
                 obs = observation_new["observation"]
                 g = observation_new["desired_goal"]
                 per_success_rate.append(info["is_success"])
@@ -424,7 +589,8 @@ class ddpg_agent:
         for _ in range(self.args.n_test_rollouts):
             policy.reset()
             per_success_rate = []
-            observation, _ = self.test_env.reset()
+            # Modern Gymnasium: reset returns (obs, info)
+            observation, info = self.test_env.reset()
             obs = observation["observation"]
             g = observation["desired_goal"]
 
@@ -435,10 +601,11 @@ class ddpg_agent:
                         act_obs,
                         act_g,
                         self.args.plan_budget,
-                        ref_loss=self.goal_loss,
+                        ref_loss=getattr(self, "jump_ref_goal_loss", self.goal_loss),
                         jump=self.args.jump,
                     )
-                observation_new, rew, terminated, truncated, info = self.test_env.step(actions)
+                # Modern Gymnasium: step returns 5 values
+                observation_new, reward, terminated, truncated, info = self.test_env.step(actions)
                 obs = observation_new["observation"]
                 g = observation_new["desired_goal"]
                 per_success_rate.append(info["is_success"])
@@ -453,14 +620,16 @@ class ddpg_agent:
         for _ in range(self.args.n_test_rollouts):
             # policy.reset()
             per_success_rate = []
-            observation, _ = self.test_env.reset()
+            # Modern Gymnasium: reset returns (obs, info)
+            observation, info = self.test_env.reset()
             obs = observation["observation"]
             g = observation["desired_goal"]
             for num in range(self.env_params["max_test_timesteps"]):
                 with torch.no_grad():
                     act_obs, act_g = self._preproc_inputs(obs, g)
                     actions = policy(act_obs, act_g)
-                observation_new, rew, terminated, truncated, info = self.test_env.step(actions)
+                # Modern Gymnasium: step returns 5 values
+                observation_new, reward, terminated, truncated, info = self.test_env.step(actions)
                 obs = observation_new["observation"]
                 g = observation_new["desired_goal"]
                 per_success_rate.append(info["is_success"])

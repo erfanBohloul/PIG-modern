@@ -1,5 +1,6 @@
 import threading
 import numpy as np
+import gymnasium as gym
 
 """
 the replay buffer here is basically from the openai baselines code
@@ -19,15 +20,16 @@ class replay_buffer:
         self.sample_func = sample_func
         # create the buffer to store info
         self.buffers = {
-            "obs": np.empty([self.size, self.T + 1, self.env_params["obs"]]),
-            "ag": np.empty([self.size, self.T + 1, self.env_params["goal"]]),
-            "g": np.empty([self.size, self.T, self.env_params["goal"]]),
-            "actions": np.empty([self.size, self.T, self.env_params["action"]]),
-            "sg": np.empty([self.size, self.T, self.env_params["goal"]]),
+            "obs": np.empty([self.size, self.T + 1, self.env_params["obs"]], dtype=np.float32),
+            "ag": np.empty([self.size, self.T + 1, self.env_params["goal"]], dtype=np.float32),
+            "g": np.empty([self.size, self.T, self.env_params["goal"]], dtype=np.float32),
+            "actions": np.empty([self.size, self.T, self.env_params["action"]], dtype=np.float32),
+            "sg": np.empty([self.size, self.T, self.env_params["goal"]], dtype=np.float32),
             "sg_series": np.empty(
-                [self.size, self.T, plan_budget, self.env_params["goal"]]
+                [self.size, self.T, plan_budget, self.env_params["goal"]], dtype=np.float32
             ),
-            "path_mask": np.empty([self.size, self.T, plan_budget]),
+            "sg_dists": np.empty([self.size, self.T, plan_budget], dtype=np.float32),
+            "path_mask": np.empty([self.size, self.T, plan_budget], dtype=np.float32),
         }
         self.fetch_task = fetch_task
 
@@ -40,18 +42,20 @@ class replay_buffer:
             mb_actions,
             mb_sg,
             mb_sg_series,
+            mb_sg_dists,
             mb_path_mask,
         ) = episode_batch
         batch_size = mb_obs.shape[0]
         idxs = self._get_storage_idx(inc=batch_size)
         # store the informations
-        self.buffers["obs"][idxs] = mb_obs
-        self.buffers["ag"][idxs] = mb_ag
-        self.buffers["g"][idxs] = mb_g
-        self.buffers["actions"][idxs] = mb_actions
-        self.buffers["sg"][idxs] = mb_sg
-        self.buffers["sg_series"][idxs] = mb_sg_series
-        self.buffers["path_mask"][idxs] = mb_path_mask
+        self.buffers["obs"][idxs] = mb_obs.astype(np.float32)
+        self.buffers["ag"][idxs] = mb_ag.astype(np.float32)
+        self.buffers["g"][idxs] = mb_g.astype(np.float32)
+        self.buffers["actions"][idxs] = mb_actions.astype(np.float32)
+        self.buffers["sg"][idxs] = mb_sg.astype(np.float32)
+        self.buffers["sg_series"][idxs] = mb_sg_series.astype(np.float32)
+        self.buffers["sg_dists"][idxs] = mb_sg_dists.astype(np.float32)
+        self.buffers["path_mask"][idxs] = mb_path_mask.astype(np.float32)
         self.n_transitions_stored += self.T * batch_size
 
     # sample the data from the replay buffer
@@ -128,3 +132,4 @@ class replay_buffer:
         if inc == 1:
             idx = idx[0]
         return idx
+    

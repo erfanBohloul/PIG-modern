@@ -129,10 +129,21 @@ def get_args():
 
     # PIG
     parser.add_argument("--lambda_goal_loss", type=float, default=1.0)
+    parser.add_argument("--goal_loss_weighting", type=str, default="uniform", choices=["uniform", "index", "graph", "euclidean"],
+        help="How to weight planned subgoals in the PIG self-imitation loss. Use 'uniform' for the original PIG loss, or 'graph'/'index'/'euclidean' for distance-weighted PIG.")
+    parser.add_argument("--goal_loss_beta", type=float, default=0.0,
+        help="Distance-weighting temperature beta for Weighted-PIG. beta=0 recovers the original uniform PIG loss.")
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--plan_budget", type=int, default=10)
     parser.add_argument("--jump", action="store_true")
     parser.add_argument("--jump_temp", type=float, default=0.1)
+
+
+    # Weighted-PIG v2: normalized, warmed-up distance weighting
+    parser.add_argument("--goal_loss_distance_normalization", type=str, default="path", choices=["none", "path"])
+    parser.add_argument("--goal_loss_uniform_mix", type=float, default=0.25, help="Fraction of uniform PIG retained in weighted PIG; must be in [0, 1].")
+    parser.add_argument("--goal_loss_warmup_steps", type=int, default=10000)
+    parser.add_argument("--goal_loss_beta_ramp_steps", type=int, default=20000)
 
     args = parser.parse_args()
     return args

@@ -5,6 +5,7 @@ from .sample import farthest_point_sample
 from torch.distributions import Categorical
 from sklearn.cluster import KMeans
 import cv2
+import gymnasium as gym
 
 
 def transform(p):
@@ -91,6 +92,18 @@ class Planner:
 
     def reset(self):
         self.saved_goal = None
+
+    def _positive_edge_distance(self, value_estimate):
+        if isinstance(value_estimate, torch.Tensor):
+            value_estimate = value_estimate.detach().cpu().item()
+        return max(float(-value_estimate), 0.0)
+
+    def _pad_distance_series(self, distances, series_budgets):
+        if len(distances) == 0:
+            distances = [1.0]
+        if len(distances) < series_budgets:
+            distances = distances + [distances[-1]] * (series_budgets - len(distances))
+        return np.asarray(distances[:series_budgets], dtype=np.float32)
 
     def update(self, obs, goal):
         if isinstance(goal, torch.Tensor):
@@ -198,6 +211,7 @@ class Planner:
         dist = obs2ld + self.dists
         self.path_len = 1
         self.goal_series = np.repeat(goal.cpu().numpy(), series_budgets, axis=0)
+        self.goal_distance_series = self._pad_distance_series([self._positive_edge_distance(obs2ld[-1])], series_budgets)
         self.mse_mean = np.zeros(1)
 
         if obs2ld[-1] < self.goal_thr:
@@ -207,6 +221,8 @@ class Planner:
 
             idx = idx.item()
             self.goal_idx_series.append(idx)
+            graph_distances = [self._positive_edge_distance(obs2ld[idx])]
+            cumulative_distance = graph_distances[-1]
             goal_idx = len(landmarks) - 1
             sg_idxs = torch.arange(landmarks.shape[0]).to(self.agent.device)
 
@@ -215,13 +231,22 @@ class Planner:
                 sg2ld = self.dists_pairwise[idx, sg_idxs]
                 ld2g = self.dists[sg_idxs]
                 sg2g = sg2ld + ld2g
-                idx = sg_idxs[
+
+                if len(self.goal_idx_series) + 1 >= series_budgets:
+                    edge_value = self.dists_pairwise[idx, goal_idx]
+                    cumulative_distance += self._positive_edge_distance(edge_value)
+                    self.goal_idx_series.append(goal_idx)
+                    graph_distances.append(cumulative_distance)
+                    break
+
+                next_idx = sg_idxs[
                     Categorical(torch.softmax(sg2g * self.heat, dim=-1)).sample((1,))
                 ].item()
+                edge_value = self.dists_pairwise[idx, next_idx]
+                cumulative_distance += self._positive_edge_distance(edge_value)
+                idx = next_idx
                 self.goal_idx_series.append(idx)
-                if len(self.goal_idx_series) + 1 >= series_budgets:
-                    self.goal_idx_series.append(goal_idx)
-                    break
+                graph_distances.append(cumulative_distance)
 
             self.path_len = len(self.goal_idx_series)
             if self.path_len < series_budgets:
@@ -229,6 +254,7 @@ class Planner:
                     [goal_idx] * (series_budgets - self.path_len)
                 )
             self.goal_series = self.landmarks[self.goal_idx_series].cpu().numpy()
+            self.goal_distance_series = self._pad_distance_series(graph_distances, series_budgets)
 
             if jump:
                 self.jump_idx = 0
